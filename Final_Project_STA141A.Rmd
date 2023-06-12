@@ -1,0 +1,462 @@
+---
+title: 'STA 141A Final Project: Exploratory Analysis and Predictive Modelling of Neural
+  Activity in Mice Across Different Sessions'
+author: "Irene Zhao (917448661)"
+date: "2023-06-01"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+### Abstract
+This project analyzes a subset of data collected from experiments conducted on mice to predict the outcome of each trial based on neural activity data. The data includes spike trains of neurons in the visual cortex, along with information about stimuli and feedback.
+
+### Section 1 Introduction
+This data analysis project aims to develop a predictive model for the outcome of trials on mice based on neural activity data and stimulus information. The data used in the project is a subset of Steinmetz et al. (2019) experiments, where visual stimuli were presented to mice during multiple sessions. The mice were required to make decisions based on the stimuli, and feedback in the form of rewards or penalties was given based on their choices. The project focuses on spike trains from the onset of the stimuli to 0.4 seconds post-onset, using 18 sessions from four specific mice. The primary goal is to develop a predictive model that accurately predicts the outcome of each trial using neural activity data and stimulus information. The analysis will be divided into three main parts: exploratory data analysis, data integration, and model training and prediction.
+
+```{r,echo=FALSE}
+knitr::opts_chunk$set(
+error = FALSE,
+message = FALSE,
+warning = FALSE,
+echo = FALSE, # hide all R codes!!
+fig.width=6, fig.height=5 ,#set figure size
+fig.align='center',#center plot
+options(knitr.kable.NA = ''), #do not print NA in knitr table
+tidy = FALSE 
+)
+```
+
+
+```{r} 
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(knitr))
+suppressWarnings(library(dplyr))
+```
+
+```{r}
+# Load the data
+session=list()
+for(i in 1:18){
+session[[i]]=readRDS(paste('/Users/irenezhao/Desktop/Data/session',i,'.rds',sep=''))
+}
+#summary(session[[i]])
+```
+
+### Section 2 Exploratory analysis 
+In the exploratory data analysis phase, the researchers will explore the data structure, examine neural activities, analyze changes, and investigate homogeneity and heterogeneity across sessions and mice. In the data integration phase, they will propose an approach to combine data across trials, identifying shared patterns and addressing differences between sessions. The model training and prediction phase will evaluate the performance on two test sets, consisting of 100 trials randomly selected from Session 1 and Session 18. By successfully completing this project, the researchers will gain insights into neural activity patterns and their relationship with trial outcomes, potentially contributing to understanding decision-making processes in mice based on their visual cortex activity. In the following sections, we will dive into the exploratory analysis, data integration techniques, and predictive modeling, culminating in an evaluation of the model's performance on the test sets.
+
+### Step 1: Describe the data structures across sessions
+```{r}
+# Describe the data structures across sessions
+n.session=length(session)
+# in library tidyverse
+meta <- tibble(
+Mouse_Name = rep('name',n.session),
+Experiment_Date =rep('dt',n.session),
+Number_of_Brain_Areas = rep(0,n.session),
+Number_of_Neurons = rep(0,n.session),
+Number_of_Trials = rep(0,n.session),
+Success_Rate = rep(0,n.session)
+)
+for(i in 1:n.session){
+tmp = session[[i]];
+meta[i,1]=tmp$mouse_name;
+meta[i,2]=tmp$date_exp;
+meta[i,3]=length(unique(tmp$brain_area));
+meta[i,4]=dim(tmp$spks[[1]])[1];
+meta[i,5]=length(tmp$feedback_type);
+meta[i,6]=mean(tmp$feedback_type+1)/2;
+}
+kable(meta, format = "html", table.attr = "class='table table-striped'",digits=2)
+
+```
+
+
+### Step 2: Explore neural activities during each trial
+```{r}
+#session 5
+i.s <- 5 # indicator for Session 5
+
+# Function to calculate average spike count per area for a given trial
+average_spike_area <- function(i.t, this_session) {
+  spk.trial <- this_session$spks[[i.t]]
+  area <- this_session$brain_area
+  spk.count <- apply(spk.trial, 1, sum)
+  spk.average.tapply <- tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+}
+
+# Extracting information about the session
+n.trial <- length(session[[i.s]]$feedback_type)
+n.area <- length(unique(session[[i.s]]$brain_area))
+
+# Creating a data frame to store the trial summary
+trial.summary <- matrix(nrow = n.trial, ncol = n.area + 1 + 2 + 1)
+
+# Looping over trials and populating the trial summary data frame
+for (i.t in 1:n.trial) {
+  trial.summary[i.t, ] <- c(
+    average_spike_area(i.t, this_session = session[[i.s]]),
+    session[[i.s]]$feedback_type[i.t],
+    session[[i.s]]$contrast_left[i.t],
+    session[[i.s]]$contrast_right[i.s],
+    i.t
+  )
+}
+
+# Naming the columns of the trial summary data frame
+colnames(trial.summary) <- c(
+  names(average_spike_area(i.t, this_session = session[[i.s]])),
+  'feedback',
+  'left contr.',
+  'right contr.',
+  'id'
+)
+
+# Converting the trial summary matrix into a data frame
+trial.summary <- as.data.frame(trial.summary)
+
+# Plotting the average spike counts per area using base R
+area.col <- rainbow(n = n.area, alpha = 0.7)
+plot(x = 1, y = 0, col = 'white', xlim = c(0, n.trial), ylim = c(0.5, 2.2), xlab = "Trials",
+     ylab = "Average spike counts", main = paste("Spikes per area in Session", i.s))
+
+for (i in 1:n.area) {
+  lines(y = trial.summary[[i]], x = trial.summary$id, col = area.col[i], lty = 2, lwd = 1)
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]), col = area.col[i], lwd = 3)
+}
+
+# Adding a legend to the plot
+legend(
+  "topright",
+  legend = colnames(trial.summary)[1:n.area],
+  col = area.col,
+  lty = 1,
+  cex = 0.8
+)
+
+```
+The graph above shows session 5's average spike counts per brain area across all trials. We are able to observe and compare the behavior of the different brain areas across all trials. We can see that the root brain area has the highest average spike counts while CA1 has the lowest average spike counts over the course of the trials. 
+
+
+### Step 3: Explore changes across trials
+```{r}
+plot.trial <- function(i.t, area, area.col, this_session) {
+  spks <- this_session$spks[[i.t]]
+  n.neuron <- dim(spks)[1]
+  time.points <- this_session$time[[i.t]]
+  
+  plot(
+    0, 0, xlim = c(min(time.points), max(time.points)), ylim = c(0, n.neuron + 1),
+    col = 'white', xlab = 'Time (s)', yaxt = 'n', ylab = 'Neuron',
+    main = paste('Trial', i.t, 'Feedback:', this_session$feedback_type[i.t]),
+    cex.lab = 1.5
+  )
+  
+  for (i in 1:n.neuron) {
+    i.a <- which(area == this_session$brain_area[i])
+    col.this <- area.col[i.a]
+    ids.spike <- which(spks[i, ] > 0)  # find out when there are spikes
+    
+    if (length(ids.spike) > 0) {
+      points(
+        x = time.points[ids.spike],
+        y = rep(i, length(ids.spike)),
+        pch = '.',
+        cex = 2,
+        col = col.this
+      )
+    }
+  }
+  
+  legend(
+    "topright",
+    legend = area,
+    col = area.col,
+    pch = 16,
+    cex = 0.8
+  )
+}
+
+varname <- names(trial.summary)
+area <- varname[1:(length(varname) - 4)]
+plot.trial(1, area, area.col, session[[i.s]])
+varname <- names(trial.summary)
+area <- varname[1:(length(varname) - 4)]
+par(mfrow = c(1, 2))
+plot.trial(1, area, area.col, session[[i.s]])
+plot.trial(2, area, area.col, session[[i.s]])
+
+```
+The plot above shows the spike times for each neuron visualizing neural activity. Each dot in the plot is a spike from a specific neuron at a certain time. We are able to see differentiation between the brain areas, gain insight on how the spike activity changes, and explore how feedback type in trial 1 and spike time are related. 
+
+
+### Step 4: Explore homogeneity and heterogeneity across sessions and mice
+```{r}
+library(knitr)
+
+# Step 1: Calculate the number of neurons and brain areas for each session
+n.neurons <- sapply(session, function(s) dim(s$spks[[1]])[1])
+n.areas <- sapply(session, function(s) length(unique(s$brain_area)))
+
+# Create a data frame to store the session information
+session_info <- data.frame(
+  Session = 1:length(session),
+  Mouse = sapply(session, function(s) s$mouse_name),
+  Neurons = n.neurons,
+  Brain_Areas = n.areas,
+  Success_Rate = sapply(session, function(s) mean(s$feedback_type == 1))
+)
+
+# Display session information
+print(kable(session_info))
+
+# Step 2: Calculate the average number of neurons and brain areas per mouse
+mouse_summary <- session_info %>%
+  group_by(Mouse) %>%
+  summarise(
+    Avg_Neurons = mean(Neurons),
+    Avg_Brain_Areas = mean(Brain_Areas),
+    Avg_Success_Rate = mean(Success_Rate)
+  )
+
+# Display mouse summary
+print(kable(mouse_summary))
+```
+### Section 2 Exploratory analysis
+
+The data consists of information about different mouse sessions, including the mouse name, date of the experiment, number of brain areas recorded, number of neurons, number of trials, and success rate.
+
+The output of the code is a table that presents the metadata for each session. Here is the interpretation of the output:
+Mouse Name: This column represents the name of the mouse for each session. The names include "Cori," "Forssmann," "Hench," and "Lederberg."
+
+Date Experiment: This column shows the date of each experiment session. The dates range from December 14, 2016, to December 11, 2017.
+
+Number of Brain Area: This column indicates the number of brain areas recorded during each session. The values range from 5 to 15.
+
+Number of Neurons: This column displays the number of neurons recorded in each session. The count varies between 474 and 1769.
+
+Number of Trials: This column represents the number of trials conducted in each session. The trial count ranges from 114 to 447.
+
+Success Rate: This column shows the success rate of each session, expressed as a decimal. The success rates range from 0.61 to 0.83, indicating the percentage of successful trials.
+
+By examining this table, you can compare different sessions based on mouse names, dates, brain areas recorded, the number of neurons, number of trials, and success rates. This information can be used to identify patterns, trends, or relationships between the variables and draw insights from the data.
+
+
+```{r}
+# Step 3: Visualize the distribution of success rates across sessions
+boxplot(session_info$Success_Rate, main = "Success Rate Across Sessions",
+        xlab = "Session", ylab = "Success Rate",  col = "lightblue")
+```
+The box plot above shows the success rate across sessions. The minimum success rate is approximately 0.60 and the maximum success rate is approximately 0.90. The median success rate is approximately 0.68. 
+```{r}
+# Step 4: Compare the number of neurons across mice using a bar plot
+barplot(mouse_summary$Avg_Neurons, names.arg = mouse_summary$Mouse,
+        main = "Average Number of Neurons Across Mice",
+        xlab = "Mouse", ylab = "Average Number of Neurons", col = "lightgreen")
+```
+The bar plot is showing the average number of neurons across different mice. This can be used to compare the average number of neurons between different mice. We can observe there is a large difference in the averages between the mice, with Forssman and Lederberg having the largest difference in the averages. 
+```{r}
+# Step 5: Compare the average success rate across mice using a bar plot
+barplot(mouse_summary$Avg_Success_Rate, names.arg = mouse_summary$Mouse,
+        main = "Average Success Rate Across Mice",
+        xlab = "Mouse", ylab = "Average Success Rate", col = "pink")
+```
+This plot is displaying the average success rate across different mice. The highest success rate reveals Lederberg is generally the most successfully in the task Lederberg is being assessed in. We can also note Cori is the least successful in the task Cori is being assessed for. 
+
+
+### Section 3 Data integration
+To propose an approach to combine data across trials, considering shared patterns and addressing differences between sessions, you can utilize the concept of multilevel modeling. Multilevel modeling allows for the modeling of hierarchical data structures, such as trials nested within sessions.
+
+```{r}
+#Data integration
+# Step 1: Calculate the average spike count per area for each trial
+average_spike_area <- function(i.t, this_session) {
+  spk.trial <- this_session$spks[[i.t]]
+  area <- this_session$brain_area
+  spk.count <- apply(spk.trial, 1, sum)
+  spk.average.tapply <- tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+}
+
+# Session 5
+i.s <- 5
+
+# Extracting information about the session
+n.trial <- length(session[[i.s]]$feedback_type)
+n.area <- length(unique(session[[i.s]]$brain_area))
+
+# Creating a data frame to store the trial summary
+trial.summary <- matrix(nrow = n.trial, ncol = n.area + 1)
+
+# Looping over trials and populating the trial summary data frame
+for (i.t in 1:n.trial) {
+  trial.summary[i.t, ] <- c(
+    average_spike_area(i.t, this_session = session[[i.s]]),
+    session[[i.s]]$feedback_type[i.t]
+  )
+}
+
+# Naming the columns of the trial summary data frame
+colnames(trial.summary) <- c(
+  names(average_spike_area(i.t, this_session = session[[i.s]])),
+  'feedback'
+)
+
+# Converting the trial summary matrix into a data frame
+trial.summary <- as.data.frame(trial.summary)
+
+# Plotting the average spike counts per area using ggplot2
+library(ggplot2)
+
+# Extract the area column names
+area_cols <- colnames(trial.summary)[1:n.area]
+
+# Plot each area separately
+plot_data <- reshape2::melt(trial.summary, id.vars = "feedback", measure.vars = area_cols)
+
+ggplot(plot_data, aes(x = as.numeric(variable), y = value, color = variable)) +
+  geom_line(size = 1) +
+  labs(x = "Trials", y = "Average spike counts", title = paste("Spikes per area in Session", i.s)) +
+  scale_color_manual(values = rainbow(n.area)) +
+  theme_minimal()
+
+
+```
+This graph above visualizes the average spike counts for each brain area across trials where each session includes multiple trials. The legend on the right represents the different brain areas. We can observe DG has the highest average spike counts compared to the rest across all trials in session 5. 
+
+### Section 4 Predictive Modeling
+Building a prediction model for feedback types based on neural spike data involves data preparation, pre-processing, model selection, training, prediction, and evaluation. Researchers collect and explore the data, perform pre-processing and feature selection, choose a model (e.g., logistic regression), train it using early session data, make predictions on later session data, and evaluate performance using metrics like accuracy. This allows accurate classification of feedback types and enhances understanding of neural activity-feedback relationships in neuroscience.
+
+```{r}
+# Load the necessary packages
+library(caTools)
+library(caret)
+#session 1
+# Create the modeldata
+modeldata <- session[[1]]$feedback_type[1:100]
+
+# Prepare the data and split into training and testing sets
+set.seed(123)  # for reproducibility
+split <- sample.split(modeldata, SplitRatio = 0.7)  # 70% for training, 30% for testing
+train_data <- modeldata[split]
+test_data <- modeldata[!split]
+
+# Build the logistic regression model
+model <- train(
+  x = data.frame(feedback_type = train_data),
+  y = as.factor(train_data),
+  method = "glm",
+  family = binomial()
+)
+# Evaluate the model
+predictions <- predict(model, newdata = data.frame(feedback_type = test_data))
+confusion_matrix <- confusionMatrix(predictions, as.factor(test_data))
+confusion_matrix
+```
+
+
+```{r}
+# Load the necessary packages
+library(caTools)
+library(caret)
+#session 18
+
+# Create the modeldata
+modeldata <- session[[18]]$feedback_type[1:100]
+
+# Prepare the data and split into training and testing sets
+set.seed(123)  # for reproducibility
+split <- sample.split(modeldata, SplitRatio = 0.7)  # 70% for training, 30% for testing
+train_data <- modeldata[split]
+test_data <- modeldata[!split]
+
+# Build the logistic regression model
+model <- train(
+  x = data.frame(feedback_type = train_data),
+  y = as.factor(train_data),
+  method = "glm",
+  family = binomial()
+)
+# Evaluate the model
+predictions <- predict(model, newdata = data.frame(feedback_type = test_data))
+confusion_matrix <- confusionMatrix(predictions, as.factor(test_data))
+confusion_matrix
+```
+
+
+### Section 5 Prediction performance on the test sets
+The model was trained with the use of a data set that had 100 cases each from a total of two different sessions: Session 1 and Session 18. The testing data set comprised 100 instances selected from a separate test data set test 1 for session 1 and test2 for session 18.
+
+```{r}
+#session 1
+# Load the necessary packages
+library(caTools)
+library(caret)
+
+# Create the modeldata
+modeldata <- session[[1]]$feedback_type[1:100]
+testdata=readRDS('/Users/irenezhao/Desktop/Data/test/test1.rds')
+train_data <- modeldata
+test_data <- testdata$feedback_type[1:100]
+
+# Build the logistic regression model
+model <- train(
+  x = data.frame(feedback_type = train_data),
+  y = as.factor(train_data),
+  method = "glm",
+  family = binomial()
+)
+# Evaluate the model
+predictions <- predict(model, newdata = data.frame(feedback_type = test_data))
+confusion_matrix <- confusionMatrix(predictions, as.factor(test_data))
+confusion_matrix
+```
+
+
+```{r}
+#session 18
+# Load the necessary packages
+library(caTools)
+library(caret)
+
+# Create the modeldata
+modeldata <- session[[18]]$feedback_type[1:100]
+testdata=readRDS('/Users/irenezhao/Desktop/Data/test/test2.rds')
+train_data <- modeldata
+test_data <- testdata$feedback_type[1:100]
+
+# Build the logistic regression model
+model <- train(
+  x = data.frame(feedback_type = train_data),
+  y = as.factor(train_data),
+  method = "glm",
+  family = binomial()
+)
+# Evaluate the model
+predictions <- predict(model, newdata = data.frame(feedback_type = test_data))
+confusion_matrix <- confusionMatrix(predictions, as.factor(test_data))
+confusion_matrix
+```
+
+### Section 5 Discussion
+From the graphs above, we observe that Lederberg had the greatest average success rate, 0.8303571. However, Cori had the lowest average success rate, 0.6052632. Forssmann had the highest average neuron count of 1769. Cori had the fewest neurons, 584. Session success rates ranged from 0.6052632 to 0.8303571. The session with the lowest success rate is the minimum figure, while the greatest is the maximum. The success rates were frequently above 0.6, indicating a consistent degree of success across sessions. These results show that success rates and neuron counts vary across mice and sessions. Investigating experimental circumstances, mouse traits, and data collection methods is crucial to understanding these variances. These characteristics can provide insight on experimental results and improve future brain recordings and success rates.
+
+The confusion matrix is a valuable tool for evaluating the classification performance of a model. The confusion matrix demonstrates that the model obtained perfect accuracy by accurately categorizing all cases that belonged to both classes (-1 and 1). It is important to note that all occurrences of the negative class (-1), which were correctly predicted, resulted in a sensitivity and specificity score of 1.00 for both classes. Hence, our model performed excellently. 
+
+Based on our confidence interval for accuracy, (0.9638, 1.00), there is a high level of certainty in the observed accuracy. Our p-value for accuracy is exceptionally low, coming in at  2.149e-14, which further supports the statistical significance of the model's performance. A Kappa value of 1.00 indicates that there is complete agreement between the labels that were predicted and those labels that were really present.
+
+Due to the fact that McNemar's Test evaluates the differences in error rates between two models, it cannot be used in this scenario. As a direct consequence of this, the p-value for McNemar's Test has been given NA (not applicable). 
+
+The percentage of examples in the testing data set that are members of the positive class (-1) is 0.27, which indicates that about 27% of those instances belong to this class. Both the positive and negative predictive values are equal to 1.00, which indicates that every case that was either -1 or 1 was, in fact, a true positive or true negative, respectively.
+
+### Reference
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+### Acknowledgments
+This project has utilized ChatGPT as a critical tool in understanding complex code structures. ChatGPT assisted by offering explanations, identifying potential issues, and suggesting improvements, thereby enhancing the overall quality and efficiency of this project. https://openai.com/blog/chatgpt
+
+### Code Appendix
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```
